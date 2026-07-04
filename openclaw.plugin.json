@@ -1,9 +1,14 @@
 {
   "id": "hierarchical",
-  "version": "0.1.0",
-  "label": "Hierarchical Agent",
-  "description": "Tree-hierarchy agent plugin with inherited prompts (PLS) and node-type tool isolation (NTS)",
-  "author": "OpenClaw Contributors",
-  "license": "MIT",
-  "hooks": ["before_prompt_build", "subagent_spawned"]
+  "name": "Hierarchical",
+  "description": "Tree-hierarchy agent harness with inherited prompts (PLS) and node-type tool isolation (NTS).",
+  "activation": {
+    "onStartup": false,
+    "onAgentHarnesses": ["hierarchical"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
 }

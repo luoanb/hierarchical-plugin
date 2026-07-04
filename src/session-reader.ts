@@ -2,11 +2,51 @@
  * Session store reader for hierarchical node-path resolution.
  */
 
-import type { PluginRuntime } from "@openclaw/plugin-sdk/core";
 import type { HierarchicalSessionReader } from "./node-path-resolver.js";
 import type { SessionNtsPatcher } from "./session-nts-align.js";
 
-type SessionRuntime = Pick<PluginRuntime, "agent"> & Partial<Pick<PluginRuntime, "config">>;
+type SessionRuntime = {
+  agent: {
+    resolveAgentWorkspaceDir: (cfg: unknown, agentId: string) => string;
+    session: {
+      getSessionEntry: (scope: { sessionKey: string }) =>
+        | {
+            label?: string;
+            spawnedBy?: string;
+            inheritedToolAllow?: string[];
+            inheritedToolDeny?: string[];
+          }
+        | undefined;
+      patchSessionEntry: (params: {
+        sessionKey: string;
+        agentId?: string;
+        storePath?: string;
+        update: (
+          entry: {
+            label?: string;
+            inheritedToolAllow?: string[];
+            inheritedToolDeny?: string[];
+          },
+          context: { existingEntry?: unknown },
+        ) =>
+          | Promise<Partial<{
+              label?: string;
+              inheritedToolAllow?: string[];
+              inheritedToolDeny?: string[];
+            }> | null>
+          | Partial<{
+              label?: string;
+              inheritedToolAllow?: string[];
+              inheritedToolDeny?: string[];
+            }>
+          | null;
+      }) => Promise<unknown>;
+    };
+  };
+  config?: {
+    current?: () => unknown;
+  };
+};
 
 export function createSessionReader(runtime: SessionRuntime): HierarchicalSessionReader {
   return async (sessionKey) => {
@@ -55,6 +95,5 @@ export function resolveHarnessWorkspaceDir(
   if (!cfg || !agentId?.trim()) {
     return undefined;
   }
-  type ResolveWorkspaceConfig = Parameters<PluginRuntime["agent"]["resolveAgentWorkspaceDir"]>[0];
-  return runtime.agent.resolveAgentWorkspaceDir(cfg as ResolveWorkspaceConfig, agentId.trim());
+  return runtime.agent.resolveAgentWorkspaceDir(cfg, agentId.trim());
 }
