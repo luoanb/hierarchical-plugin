@@ -2,12 +2,17 @@
  * Session store reader for hierarchical node-path resolution.
  */
 
+import type { OpenClawConfig } from "openclaw/plugin-sdk/plugin-entry";
 import type { HierarchicalSessionReader } from "./node-path-resolver.js";
 import type { SessionNtsPatcher } from "./session-nts-align.js";
 
 type SessionRuntime = {
   agent: {
-    resolveAgentWorkspaceDir: (cfg: unknown, agentId: string) => string;
+    resolveAgentWorkspaceDir: (
+      cfg: OpenClawConfig,
+      agentId: string,
+      env?: NodeJS.ProcessEnv,
+    ) => string;
     session: {
       getSessionEntry: (scope: { sessionKey: string }) =>
         | {
@@ -91,7 +96,7 @@ export function resolveHarnessWorkspaceDir(
   runtime: SessionRuntime,
   agentId?: string,
 ): string | undefined {
-  const cfg = runtime.config?.current?.();
+  const cfg = runtime.config?.current?.() as OpenClawConfig | undefined;
   if (!cfg || !agentId?.trim()) {
     return undefined;
   }

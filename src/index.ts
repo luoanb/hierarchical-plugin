@@ -5,7 +5,10 @@
  * `agentRuntime: { id: "hierarchical" }` are executed by this harness.
  */
 
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  definePluginEntry,
+  type OpenClawPluginDefinition,
+} from "openclaw/plugin-sdk/plugin-entry";
 import { createHierarchicalHarness } from "./harness.js";
 import {
   createSessionEntryReader,
@@ -15,7 +18,7 @@ import {
 } from "./session-reader.js";
 import { handleHierarchicalSubagentSpawned } from "./subagent-spawn-hook.js";
 
-export default definePluginEntry({
+const plugin: OpenClawPluginDefinition = definePluginEntry({
   id: "hierarchical",
   name: "Hierarchical Agent",
   description:
@@ -50,3 +53,5 @@ export default definePluginEntry({
     });
   },
 });
+
+export default plugin;

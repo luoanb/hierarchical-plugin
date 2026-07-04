@@ -1,5 +1,12 @@
 # Technical Plan / 技术方案：Hook 版层级 Agent（V3）
 
+> **状态**：废案 / Abandoned  
+> **废弃日期**：2026-07-04  
+> **原因**：不采用 Hook-only V3 方案；继续基于以前的 harness / runtime 方案推进。  
+> **后续方向**：回到前置方案，但必须补充并解决 auth 问题后才能进入代码开发。
+
+---
+
 ## Requirement Baseline / 需求基线
 
 - **对应需求文档**：`requirements.md`（PLS、NTS、spawn 链、`label` 约定不变）
@@ -31,8 +38,9 @@
 | Core / SDK        | 依赖 `runOpenClawEmbeddedAttempt`、`discoverAuthStorage` export | **无**                                                      |
 | `/status` Runtime | 显示 `hierarchical`                                             | 显示 `openclaw`（或当前 model 默认 runtime）                |
 
-**选定方案**：Hook-only 插件（V3）  
-**决策理由**：功能目标（PLS + NTS + spawn 链）可用官方 hook 契约完成；避免包装型 harness 与 core lean path 的阻抗失配。
+**原选定方案**：Hook-only 插件（V3）  
+**当前决策**：废弃本方案，不再作为执行依据。  
+**废弃理由**：实际推进方向回到以前的 harness / runtime 方案；本方案试图绕开 auth reload / discovery 问题，但不再符合当前路线。auth 问题应在旧方案上被显式建模、设计和验证，而不是通过 Hook-only 改写架构来规避。
 
 ---
 
@@ -291,9 +299,9 @@ agents: {
 
 ## Execute Checkpoint / 执行检查点
 
-- **当前状态**：方案文档（待批准）
-- **批准后第一步**：实现 `prompt-build-hook.ts` + `index.ts` 注册
-- **核心目标**：零 core 依赖、无 auth reload、PLS+NTS 行为与 V2 等价
-- **风险**：低（复用已有 PLS/NTS/session 模块；删除 delegate 减复杂度）
+- **当前状态**：废案（禁止执行）
+- **原批准状态**：已撤销
+- **下一步**：回到以前的方案文档，先补齐 auth 问题的规格、技术设计与验证计划
+- **代码开发限制**：auth 方案未写入文档且未获确认前，不进入代码开发
 
-**Execution Approval**: `Approved` — 2026-07-04
+**Execution Approval**: `Revoked / Abandoned` — 2026-07-04

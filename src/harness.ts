@@ -28,6 +28,10 @@ import type {
   AgentHarnessCompactResult,
   AgentHarnessResetParams,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
+import {
+  createDelegateAuthStorageBridge,
+  type HierarchicalAuthResolver,
+} from "./delegate-auth-bridge.js";
 import { buildHierarchicalAttemptContext } from "./harness-context.js";
 import type { HierarchicalSessionReader } from "./node-path-resolver.js";
 import {
@@ -79,6 +83,8 @@ export type HierarchicalHarnessDeps = {
    * Tests inject a mock here.
    */
   delegateRunAttempt?: (params: AgentHarnessAttemptParams) => Promise<AgentHarnessAttemptResult>;
+  /** Resolve user-configured provider auth when OpenClaw gave plugin harnesses an empty auth store. */
+  resolveApiKeyForProvider?: HierarchicalAuthResolver;
 };
 
 // ---------------------------------------------------------------------------
@@ -152,6 +158,9 @@ export function createHierarchicalHarness(deps: HierarchicalHarnessDeps = {}): A
           agentHarnessRuntimeOverride: "openclaw",
           extraSystemPrompt: ctx.extraSystemPrompt,
           toolsAllow: ctx.toolsAllow,
+          authStorage: createDelegateAuthStorageBridge(params, {
+            resolveApiKeyForProvider: deps.resolveApiKeyForProvider,
+          }),
           bootstrapContextMode: params.bootstrapContextMode ?? "lightweight",
         });
 

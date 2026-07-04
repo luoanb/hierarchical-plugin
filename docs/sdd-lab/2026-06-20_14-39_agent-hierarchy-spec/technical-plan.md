@@ -348,12 +348,158 @@ api.registerAgentHarness({
 | ③ 提示词加载 | PLS 目录树聚合 | hierarchical/prompt/ 统一管理，子层覆盖父层 |
 | ④ 工具权限 | NTS 节点类型检测 | 枝/叶/根三类自动推断 |
 | ⑤ 调度机制 | 框架 sessions_spawn + Context Engine | 不干预 spawn，全部交给框架基础设施 |
+
+## Blocking Issue / 阻塞问题：hierarchical runtime 下用户 API key 不生效
+
+### 观测现象
+
+当模型配置选择 `agentRuntime: { id: "hierarchical" }` 后，用户已配置的 provider API key 不会生效。运行时默认走空的 `authStore`，导致模型调用在回复前失败。
+
+错误文案：
+
+```text
+⚠️ Agent failed before reply: No API key found for scnet.
+
+Use /login to log into a provider via OAuth or API key. See:
+  /home/lab/workspace/openclaw/docs/providers.md
+  /home/lab/workspace/openclaw/docs/models.md.
+Logs: openclaw logs --follow
+```
+
+### 当前判断
+
+- **影响范围**：所有显式选择 `hierarchical` runtime 且依赖用户 provider API key 的模型调用。
+- **直接后果**：PLS / NTS / spawn 链尚未进入有效模型执行阶段即失败。
+- **根因定位**：OpenClaw 入口把所有非 `openclaw` harness 统一判断为 `pluginHarnessOwnsTransport = true`。hierarchical 被选中后，外层 run 在模型解析阶段走 `skipAgentDiscovery: true`，`resolveModelAsync` 因此创建空的 `authStorage` / `modelRegistry`；auth 阶段又因为“插件自管 transport”创建空 `authStore` 并跳过通用 `initializeAuthProfile()`。但 hierarchical 实际并不自管模型 transport，而是预处理 PLS/NTS 后 delegate 回 `runOpenClawEmbeddedAttempt`，导致内层 OpenClaw runner 接收到的就是空 auth 上下文。
+- **与本方案关系**：本方案仍采用 `registerAgentHarness` + delegate OpenClaw runner，因此 auth store 传递/发现是必须解决的主路径问题，不能通过切换到 Hook-only 方案规避。
+
+代码链路：
+
+1. `src/agents/embedded-agent-runner/run.ts`：`const pluginHarnessOwnsTransport = agentHarness.id !== "openclaw"`。
+2. 同文件模型解析：当 hierarchical 被选中时仍传 `skipAgentDiscovery: true`。
+3. `src/agents/embedded-agent-runner/model.ts`：`skipAgentDiscovery` 且未显式传入 store 时，调用 `createEmptyAgentDiscoveryStores()`。
+4. `src/agents/embedded-agent-runner/run.ts` auth 阶段：`pluginHarnessOwnsTransport && !pluginHarnessNeedsOpenClawAuthBootstrap` 时使用 `createEmptyAuthProfileStore()`，且不执行 `initializeAuthProfile()`。
+5. `src/harness.ts`：hierarchical 再把这些 params 原样 delegate 给 `runOpenClawEmbeddedAttempt({ ...params, agentHarnessRuntimeOverride: "openclaw" })`，内层不会重新做外层模型/auth discovery。
+
+### Codex 对照 / auth-only 范围
+
+参考 `/home/lab/workspace/openclaw/extensions/codex` 的目的只限于定位 auth 处理方式，不扩大到 provider/catalog/manifest 改造。
+
+| Codex 文件 / 配置 | 可借鉴点 | 本次是否纳入 |
+| --- | --- | --- |
+| `src/app-server/auth-bridge.ts` | 从传入 store 优先读取；缺失时按 agentDir/config/profile 补充 auth profile；仅补运行时所需凭据 | ✅ 仅借鉴 auth bridge 思路 |
+| `index.ts` 注册 provider/tools/commands | Codex 作为完整 native runtime 的配套能力 | ❌ 非本次目标 |
+| `provider.ts` / `provider-catalog.ts` / `provider-discovery.ts` | Codex 自有 provider/catalog/synthetic auth | ❌ 非本次目标 |
+| `openclaw.plugin.json` 的 providers/syntheticAuthRefs | Codex 自有 provider 声明 | ❌ 非本次目标 |
+
+关键边界：hierarchical 当前目标不是新增 provider，也不是改变模型配置语义；只修复 `agentRuntime.id: "hierarchical"` 时 delegate OpenClaw runner 收到空 auth 上下文的问题。
+
+### 解决思路
+
+#### 方案 A（推荐，唯一执行范围）：delegate 前补齐 authStorage fallback bridge
+
+保持当前“任意 provider + hierarchical runtime”用法，不新增 provider，不改 manifest，不改变 PLS/NTS。只在 `src/harness.ts` delegate `runOpenClawEmbeddedAttempt` 前包装 `params.authStorage`，用公开 SDK `openclaw/plugin-sdk/provider-auth-runtime` 的 `resolveApiKeyForProvider(...)` 做 fallback。
+
+执行约束：
+
+1. 只新增一个小模块（建议 `src/delegate-auth-bridge.ts`）并在 `src/harness.ts` 调用。
+2. 不新增 `provider.ts`、`provider-catalog.ts`、`provider-discovery.ts`。
+3. 不修改 `openclaw.plugin.json` 的 provider/catalog/synthetic auth 声明。
+4. 不改变 `agentRuntime.id: "hierarchical"` 配置语义。
+5. 不改 PLS、NTS、spawn、label、工具矩阵逻辑。
+
+预期行为：
+
+1. 优先使用原始 `params.authStorage.getApiKey(...)`。
+2. 原始 store 取不到 key 时，通过 `resolveApiKeyForProvider(...)` 按当前 provider/model/config/profile 解析用户配置。
+3. 解析到 key 后写入原始 `authStorage.setRuntimeApiKey(...)`，再返回给内层 OpenClaw runner。
+4. 若仍无法解析 key，保留 OpenClaw 原始错误，不吞错、不伪造 credential。
+
+该方案只补偿当前 auth 缺口。它不是 provider/catalog 重构，也不尝试解决所有 plugin harness transport ownership 语义问题。
+
+#### 方案 B（长期上游建议）：core 增加 harness transport ownership 契约
+
+把“插件 harness”与“插件自管模型 transport”拆开建模。`AgentHarness` 增加一个显式能力字段，例如：
+
+```typescript
+type AgentHarness = {
+  id: string;
+  ownsModelTransport?: boolean; // 默认 true for plugin harness；hierarchical 显式 false
+  runAttempt(...): Promise<...>;
+};
+```
+
+然后 `run.ts` 将：
+
+```typescript
+const pluginHarnessOwnsTransport = agentHarness.id !== "openclaw";
+```
+
+改为基于显式契约判断：
+
+```typescript
+const pluginHarnessOwnsTransport =
+  agentHarness.id !== "openclaw" && agentHarness.ownsModelTransport !== false;
+```
+
+hierarchical 注册：
+
+```typescript
+{
+  id: "hierarchical",
+  ownsModelTransport: false,
+  ...
+}
+```
+
+预期效果：
+
+- hierarchical 仍通过 `agentRuntime.id: "hierarchical"` 选中。
+- 外层模型解析不再进入空 discovery store 路径。
+- auth 阶段走 OpenClaw native 逻辑：加载用户 `/login` / config / provider discovery 的 API key。
+- delegate 给 `runOpenClawEmbeddedAttempt` 时，`params.authStorage`、`params.authProfileStore`、`params.modelRegistry`、`resolvedApiKey` 已经是 native OpenClaw 解析结果。
+
+该方案是架构上最干净的修复，但需要 OpenClaw core 权限或上游合入，不能作为当前插件开发者的执行前提。
+
+#### 方案 C（不可作为插件方案）：core 特判 hierarchical 不自管 transport
+
+在 `run.ts` 将判断改为：
+
+```typescript
+const pluginHarnessOwnsTransport =
+  agentHarness.id !== "openclaw" && agentHarness.id !== "hierarchical";
+```
+
+优点是改动最小，可快速验证 auth 修复；缺点是把 hierarchical 插件 id 写死进 core，不适合作为长期 API。
+
+#### 方案 D（不推荐）：hierarchical harness 内部重新 discover auth
+
+在 `src/harness.ts` delegate 前自行调用 `discoverAuthStorage` / `discoverModels` 并覆盖 params。
+
+不推荐原因：
+
+- 插件需要依赖更多 core SDK export。
+- 容易与 OpenClaw run.ts 的 authProfile、provider runtime hook、fallback/profile rotation 逻辑重复或漂移。
+- 本质是在插件里修补 core 对 harness transport ownership 的误判。
+
+### 设计要求
+
+1. 本次只解决 auth：hierarchical runtime 下用户配置的 API key / auth profile / env key 必须能被 delegate 的 OpenClaw runner 使用。
+2. 不新增 provider/catalog/synthetic auth/manifest providers 声明。
+3. 不改变模型配置语义，继续支持当前 `provider/model + agentRuntime.id: "hierarchical"` 路径。
+4. auth 修复必须有 Gateway 实机验证：同一模型在 native OpenClaw runtime 可用时，切换到 `hierarchical` runtime 也必须可用。
+5. 当前插件迭代只能采用插件侧可落地方案；core 契约修复只能作为上游建议或后续贡献项。
+
+### 执行约束
+
+auth 方案未补齐、未确认、未通过验证计划前，不进入新的代码开发。若文档与代码行为冲突，以本文档后续补充的 auth 设计为准。
+
 ## Decision / 方案决策
 
 - **Selected / 选定方案**：registerAgentHarness 独立实现（维度 1–5 全部采纳）
 - **Decision Owner / 决策人**：景总
 - **Decision Time / 决策时间**：2026-06-21
-- **方案确认状态**：✅ 已确认
+- **方案确认状态**：✅ 基线已确认；⚠️ 因 auth 阻塞暂停执行
 
 ### 执行阶段划分
 
@@ -362,7 +508,7 @@ api.registerAgentHarness({
 | V1 | PLS + Scanner + NTS 模块 + harness 桩（验证组装逻辑） | ✅ 完成 |
 | V2 | node-path-resolver + harness delegate OpenClaw runner + toolsAllow 硬过滤 | ✅ 完成（46 tests） |
 | V3 | Gateway E2E spawn 链（自动化） | ✅ 6 tests + demo-workspace fixture |
-| V3b | Gateway 实机验证 | ⏸️ 可选（需 pnpm build + live GW） |
+| V3b | Gateway 实机验证 | ⚠️ 必做：先验证 auth，再验证 spawn 链 |
 
 ## Open Questions / 开放问题（已关闭）
 
@@ -375,17 +521,30 @@ api.registerAgentHarness({
 
 ### 改动范围总览
 
-**框架核心：0 行修改。** 所有改动在 `extensions/hierarchical/` 内。
+**原基线**：框架核心 0 行修改，所有 hierarchical 功能改动在 `extensions/hierarchical/` 内。  
+**auth-only 更新**：当前只新增 delegate auth bridge；不补 provider/catalog/synthetic auth/manifest provider 声明。
 
 | 操作 | 文件 | 行数估计 |
 |---|---|---:|
-| 新增 | `extensions/hierarchical/index.ts` | ~30 行 |
-| 新增 | `extensions/hierarchical/harness.ts` | ~200 行 |
-| 新增 | `extensions/hierarchical/prompt-loader.ts` | ~100 行 |
-| 新增 | `extensions/hierarchical/node-tool-registry.ts` | ~80 行 |
-| 新增 | `extensions/hierarchical/agent-children-scanner.ts` | ~50 行 |
-| 新增 | `extensions/hierarchical/package.json` | ~20 行 |
-| **合计** | | **~480 行** |
+| 修改 | `extensions/hierarchical/harness.ts` | ~20 行 |
+| 新增 | `extensions/hierarchical/delegate-auth-bridge.ts` | ~80 行 |
+| 新增/修改 | `extensions/hierarchical/delegate-auth-bridge.test.ts` 或 `harness.test.ts` | ~80 行 |
+| 保持 | `extensions/hierarchical/index.ts` | 不注册 provider |
+| 保持 | `extensions/hierarchical/openclaw.plugin.json` | 不新增 providers/catalog 声明 |
+| 保持 | `extensions/hierarchical/prompt-loader.ts` | 无关 auth，不改 |
+| 保持 | `extensions/hierarchical/node-tool-registry.ts` | 无关 auth，不改 |
+| 保持 | `extensions/hierarchical/agent-children-scanner.ts` | 无关 auth，不改 |
+| 保持 | `extensions/hierarchical/package.json` | 仅在 SDK import 需要时最小调整 |
+| **合计** | | **~180 行** |
+
+### 非目标
+
+- 不新增 `provider.ts`
+- 不新增 `provider-catalog.ts`
+- 不新增 `provider-discovery.ts`
+- 不注册 `api.registerProvider(...)`
+- 不修改 `openclaw.plugin.json` 的 `providers` / `providerCatalogEntry` / `syntheticAuthRefs` / `nonSecretAuthMarkers`
+- 不改 PLS / NTS / spawn / label / 工具矩阵
 
 ### 各文件详解
 
@@ -958,7 +1117,7 @@ export function createHierarchicalHarness(rootDir: string): AgentHarness {
 
 ### 文件 5：`extensions/hierarchical/index.ts`
 
-**职责**：插件入口，注册 AgentHarness。
+**职责**：插件入口，注册 AgentHarness（本次 auth-only 不注册 Provider）。
 
 **依赖**：harness, plugin SDK
 
@@ -1013,24 +1172,28 @@ export default definePluginEntry({
 | 子 Agent 会话管理依赖框架                  | 只复用 spawn 的会话创建，提示词构建在 harness 内部完全自主 |
 | `resolveAgentHarnessPolicy` 对新 id 的支持 | 现有路由已支持任意 `id` 字符串，不需要改                   |
 | 用户需要手动配置 agentRuntime              | 这是意图明确的显式选择，不是负担                           |
+| hierarchical runtime 读取空 `authStore`    | 新增 auth 专项设计；复用 native provider discovery；Gateway 验证用户 API key 生效 |
 
 ## Validation Plan / 验证计划
 
 - **静态检查**：TypeScript 编译通过
 - **单元测试**：新增 prompt-loader.test.ts, node-tool-registry.test.ts
 - **集成测试**：spawn 子 Agent → 验证提示词继承 + 工具权限
+- **Auth 回归测试**：配置 `agentRuntime: { id: "hierarchical" }` 后，确认已登录/已配置 API key 的 provider 不再报 `No API key found`
 - **手动验证**：
   1. 配置 `agentRuntime: { id: "hierarchical" }`
-  2. 根 Agent 提示词包含可用子 Agent 列表
-  3. 运行 `sessions_spawn` → 子 Agent 提示词包含继承内容
-  4. 枝节点看不到 execution 工具
-  5. 叶节点看不到 dispatch 工具
+  2. 使用已配置 API key 的 provider/model 发起一次根 Agent turn，确认不出现 `No API key found for scnet`
+  3. 根 Agent 提示词包含可用子 Agent 列表
+  4. 运行 `sessions_spawn` → 子 Agent 提示词包含继承内容
+  5. 枝节点看不到 execution 工具
+  6. 叶节点看不到 dispatch 工具
 
 ## Execute Checkpoint / 执行检查点
 
 - **当前理解**：registerAgentHarness 独立实现，框架零改动（V2 新增 1 行 SDK export：`runOpenClawEmbeddedAttempt`）
-- **核心目标**：V2 harness 委托 OpenClaw embedded runner，NTS 通过 `toolsAllow` 硬过滤
-- **下一步**：Gateway E2E（VALIDATION §4）
-- **风险**：低
+- **核心目标**：仅修复 hierarchical delegate 路径的 auth 缺失，不做 provider/catalog/manifest/PLS/NTS 改造
+- **当前执行项**：新增 delegate auth bridge，并在 `harness.ts` delegate 前接入
+- **下一步**：Gateway 实机验证 `scnet` API key 在 `agentRuntime.id: "hierarchical"` 下生效
+- **风险**：中（仅补 authStorage fallback；复杂 provider discovery/runtime auth 仍需实机确认）
 
-**Execution Approval**: `Approved`（2026-06-21）
+**Execution Approval**: `Approved for auth-only fix` — 2026-07-04

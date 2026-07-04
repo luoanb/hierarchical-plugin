@@ -7,14 +7,24 @@
     "url": "https://github.com/openclaw/openclaw"
   },
   "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/*.test.ts",
+    "test:auth": "tsx --test --test-name-pattern \"bridges missing delegate auth\" src/harness.test.ts"
+  },
   "peerDependencies": {
     "openclaw": ">=2026.6.8"
   },
   "devDependencies": {
-    "openclaw": ">=2026.6.8"
+    "openclaw": ">=2026.6.8",
+    "tsx": "^4.22.5",
+    "typescript": "^6.0.3"
   },
   "openclaw": {
-    "extensions": ["./index.ts"],
+    "extensions": [
+      "./index.ts"
+    ],
     "compat": {
       "pluginApi": ">=2026.6.8"
     },

@@ -75,6 +75,81 @@ describe("hierarchical harness delegate", () => {
     assert.ok(Array.isArray(captured!.toolsAllow));
   });
 
+  it("bridges missing delegate auth through provider auth resolver", async () => {
+    let captured: AgentHarnessAttemptParams | undefined;
+    const runtimeKeys: Record<string, string> = {};
+    const authStorage = {
+      getApiKey: async (provider: string) => runtimeKeys[provider],
+      setRuntimeApiKey: (provider: string, apiKey: string) => {
+        runtimeKeys[provider] = apiKey;
+      },
+    };
+    const harness = createHierarchicalHarness({
+      resolveApiKeyForProvider: async (params) => {
+        assert.equal(params.provider, "scnet");
+        assert.equal(params.modelApi, "openai-completions");
+        return { apiKey: "sk-scnet" };
+      },
+      delegateRunAttempt: async (params) => {
+        captured = params;
+        const apiKey = await (
+          params.authStorage as typeof authStorage
+        ).getApiKey("scnet");
+        assert.equal(apiKey, "sk-scnet");
+        return {
+          aborted: false,
+          externalAbort: false,
+          timedOut: false,
+          idleTimedOut: false,
+          timedOutDuringCompaction: false,
+          promptError: null,
+          promptErrorSource: null,
+          sessionIdUsed: params.sessionId,
+          assistantTexts: ["ok"],
+          messagesSnapshot: [],
+          toolMetas: [],
+          lastAssistant: undefined,
+          didSendViaMessagingTool: false,
+          messagingToolSentTexts: [],
+          messagingToolSentMediaUrls: [],
+          messagingToolSentTargets: [],
+          cloudCodeAssistFormatError: false,
+          replayMetadata: {
+            mode: "bypass",
+            hadPotentialSideEffects: false,
+            replaySafe: true,
+          },
+          itemLifecycle: { interactionId: "", runId: "", sessionId: params.sessionId },
+          setTerminalLifecycleMeta: () => {},
+        } as unknown as AgentHarnessAttemptResult;
+      },
+    });
+
+    await harness.runAttempt({
+      sessionId: "s-auth",
+      workspaceDir: "/tmp/empty-hierarchical-workspace",
+      provider: "scnet",
+      modelId: "deepseek",
+      model: {
+        provider: "scnet",
+        id: "deepseek",
+        api: "openai-completions",
+      } as AgentHarnessAttemptParams["model"],
+      messages: [],
+      authStorage: authStorage as AgentHarnessAttemptParams["authStorage"],
+      authProfileStore: {} as AgentHarnessAttemptParams["authProfileStore"],
+      modelRegistry: {} as AgentHarnessAttemptParams["modelRegistry"],
+      thinkLevel: "off",
+      sessionFile: "/tmp/s-auth.jsonl",
+      prompt: "hello",
+      timeoutMs: 30_000,
+      runId: "run-auth",
+    } as AgentHarnessAttemptParams);
+
+    assert.ok(captured);
+    assert.equal(runtimeKeys.scnet, "sk-scnet");
+  });
+
   it("aligns inheritedToolAllow before delegate when session has root allow on leaf path", async () => {
     const patches: SessionNtsPatch[] = [];
     const demoSessions: Record<
@@ -154,6 +229,6 @@ describe("hierarchical harness delegate", () => {
     assert.equal(patches.length, 1);
     assert.deepEqual(patches[0]!.inheritedToolAllow, listToolNamesForNodeType("leaf"));
     assert.ok(captured);
-    assert.ok(captured!.toolsAllow.includes("exec"));
+    assert.ok(captured!.toolsAllow?.includes("exec"));
   });
 });
